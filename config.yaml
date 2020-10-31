@@ -1,0 +1,6 @@
+urls:
+  - url: https://shibboleth-english.com
+    repeat: 15
+    regex: some*regex
+  - url: https://annewenkel.com
+    repeat: 15

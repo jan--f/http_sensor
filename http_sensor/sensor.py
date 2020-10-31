@@ -47,7 +47,35 @@ class Sensors(object):
 
         self.queue = queue.PriorityQueue()
 
+        self.load_config()
+
         self.start_sensors()
+
+    def load_config(self):
+        config_file_path = 'config.yaml'
+        # config_file_path = '/home/jan/work/code/python/aiven/config.yaml'
+        config_file_location = pathlib.PosixPath(config_file_path).absolute()
+        self.log.debug(f'loading config file at {config_file_path}')
+        conf = {}
+        try:
+            with open(config_file_location) as fd:
+                conf = yaml.safe_load(fd, Loader=yaml.FullLoader)
+        except yaml.YAMLError:
+            # maybe add some info about Error here
+            self.log.error(f'Can\'t reload config at {config_file_location}')
+        except OSError:
+            self.log.error(f'Can\'t open config at {config_file_location}')
+        urls = conf.get('urls', [])
+        if not isinstance(urls, list):
+            self.log.error('Expected a list under \'urls\' key, abort config load')
+            return
+        self.log.info(f'Found {len(urls)} urls, will process now')
+        new_queue = queue.PriorityQueue()
+        for url in urls:
+            new_queue.put(PrioritizedUrl(url))
+
+        self.log.info('loaded new queue from config, will start processing new queue')
+        self.queue = new_queue
 
     def start_sensors(self):
         while True:
