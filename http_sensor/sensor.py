@@ -1,17 +1,22 @@
 #!/usr/bin/env python
 
-import daemon
+import daemon # type: ignore
 import logging
 import os
 import pathlib
-import queue
+import pickle
+import re
+import requests
 import signal
 import time
 import yaml
 
+from concurrent import futures
 from dataclasses import dataclass, field
-from pidlockfile import PIDLockFile
-from typing import Any
+from datetime import datetime
+from kafka import KafkaProducer # type: ignore
+from pidlockfile import PIDLockFile # type: ignore
+from queue import PriorityQueue, Empty as QueueEmpty
 
 
 NAME = 'sensor'
@@ -21,11 +26,48 @@ LOG_FILE_PATH = f'/tmp/http_{NAME}.log'
 
 @dataclass(order=True)
 class PrioritizedUrl:
-    data: Any = field(compare=False)
+    data: dict = field(compare=False)
     priority: int = field(default=0)
 
 
+def setup_logging(level):
+    log = logging.getLogger(NAME)
+    log.setLevel(getattr(logging, level, logging.INFO))
+    fh = logging.FileHandler(LOG_FILE_PATH)
+    # fh.setLevel(logging.INFO)
+    fh.setLevel(getattr(logging, level, logging.INFO))
+    log_format = '%(asctime)s|%(levelname)s|%(message)s'
+    fh.setFormatter(logging.Formatter(log_format))
+    log.addHandler(fh)
+    log.debug('Done setting up logging')
+    return log
+
+
+# test that we never get more then max_num and that it returns on empty
+def get_queue_slice(q, max_num=32):
+    '''
+    A generator that dequeues at most `max_num` items if available.
+    If the queue has nothing available it will stop.
+    '''
+    n = 0
+    while n < max_num:
+        try:
+            item = q.get_nowait()
+            yield item
+            n += 1
+        except QueueEmpty:
+            return
+
+
 class Sensors(object):
+
+    # make sure there is always a queue
+    queue: PriorityQueue = PriorityQueue()
+    # and create the kafka_prod name
+    kafka_prod = None
+
+    def __init__(self, args):
+        self.args = args
 
     def run(self):
         '''
@@ -33,72 +75,114 @@ class Sensors(object):
         As the ctor is called before daemonizing (we need to pass our signal
         handler to DaemonContext), doing this in the ctor would close our log
         file handle. Seems more awkward to wrestle the file handle from
-        logging.
+        logging in order to whitelist it..
         '''
-        self.log = logging.getLogger(NAME)
-        self.log.setLevel(logging.INFO)
-        fh = logging.FileHandler(LOG_FILE_PATH)
-        # fh.setLevel(logging.INFO)
-        fh.setLevel(logging.DEBUG)
-        log_format = '%(asctime)s|%(levelname)s|%(message)s'
-        fh.setFormatter(logging.Formatter(log_format))
-        self.log.addHandler(fh)
-        self.log.debug('Done setting up logging')
-
-        self.queue = queue.PriorityQueue()
+        self.log = setup_logging(self.args.log_level)
 
         self.load_config()
 
-        self.start_sensors()
+        try:
+            self.start_sensors()
+        except Exception as e:
+            self.log.critical(f'Caught unhandled exception: {getattr(e, "message", e)}')
+            self.log.error('Exiting')
+            exit(1)
 
     def load_config(self):
-        config_file_path = 'config.yaml'
-        # config_file_path = '/home/jan/work/code/python/aiven/config.yaml'
-        config_file_location = pathlib.PosixPath(config_file_path).absolute()
-        self.log.debug(f'loading config file at {config_file_path}')
         conf = {}
         try:
-            with open(config_file_location) as fd:
-                conf = yaml.safe_load(fd, Loader=yaml.FullLoader)
-        except yaml.YAMLError:
-            # maybe add some info about Error here
-            self.log.error(f'Can\'t reload config at {config_file_location}')
-        except OSError:
-            self.log.error(f'Can\'t open config at {config_file_location}')
-        urls = conf.get('urls', [])
-        if not isinstance(urls, list):
-            self.log.error('Expected a list under \'urls\' key, abort config load')
-            return
-        self.log.info(f'Found {len(urls)} urls, will process now')
-        new_queue = queue.PriorityQueue()
-        for url in urls:
-            new_queue.put(PrioritizedUrl(url))
+            # read and parse the config file
+            config_file_path = self.args.config
+            config_file_location = pathlib.PosixPath(config_file_path).absolute()
+            self.log.debug(f'loading config file at {config_file_path}')
+            try:
+                with open(config_file_location) as fd:
+                    conf = yaml.safe_load(fd)
+            except yaml.YAMLError as e_yml:
+                self.log.error(f'Can\'t reload config at {config_file_location}: {e_yml}')
+                return
+            except OSError as e_os:
+                self.log.error(f'Can\'t open config at {config_file_location}: {e_os}')
+                return
 
-        self.log.info('loaded new queue from config, will start processing new queue')
-        self.queue = new_queue
+            # attempt to load our urls and if successful populate the inital queue.
+            urls = conf.get('urls', [])
+            if not isinstance(urls, list):
+                self.log.error('Expected a list under \'urls\' key, abort config load')
+                return
+            self.log.info(f'Found {len(urls)} urls, will process now')
+            new_queue = PriorityQueue()
+            for url in urls:
+                if 'regex' in url and url['regex']:
+                    # precompile regex if present
+                    url['regex'] = re.compile(url['regex'])
+                    # TODO maybe introduce a random element for first scheduling
+                new_queue.put(PrioritizedUrl(url))
+            self.log.info('loaded new queue from config, will start processing new queue')
+            self.queue = new_queue
 
+            # attempt to create our Kafka producer
+            kafka_conf = conf.get('kafka', {})
+            self.kafka_prod = MyKafkaProducer(kafka_conf, self.log)
+        except Exception as e:
+            self.log.error(f'Caught unhandled exception during config load: '
+                           f'{getattr(e, "message", e)}')
+            self.log.error(f'Due to error above config was only partially '
+                           f'reloaded: {conf}')
+
+    def _submit_work(self, thread_pool, data, config):
+        '''
+        Only log and submit here
+        '''
+        self.log.debug(f'Starting on work item {data}')
+        return thread_pool.submit(worker, data, config)
+
+    # test that things get rescheduled
     def start_sensors(self):
-        while True:
-            '''
-            start threadpool and hav them check a queue
-            main thread reads a file once for url to check
-            reread file on signal, ctl can add urls to file and signal
-            urls plus interval (default 5s) is the workload
-            once worker has finished scrape, re-enquue url with wait
-            sort queue by wait
-            results are added to queue and send to kafka or worker thread sends to
-            kafka?
-            cfg: url file, kafka endpoint, default kafka topics, num workers
-            url file: url repeat schedule [kafka topics]
+        '''
+        Start a thread pool of sensor workers. Initially start as many workers
+        as `get_queue_slice` returns. Then re-schedule workers as mor items
+        become (or already are) available in the queue.
+        When the queue doesn't return any more items, we consider ourselfes
+        done.
+        '''
+        self.log.info('Starting threadpool')
+        with futures.ThreadPoolExecutor() as thread_pool:
+            worker_context = {
+                'log': self.log,
+                'kafka_producer': self.kafka_prod,
+            }
+            sensor_futures = {self._submit_work(thread_pool, data, worker_context): data
+                              for data in get_queue_slice(self.queue)}
 
-            use a prioroty queue with prio determined by projected next exec time,
-            when enqueueing get now+repeat_interval
-            '''
-            self.log.info("sample INFO message")
-            time.sleep(5)
+            while sensor_futures:
+                done, _working = futures.wait(sensor_futures,
+                                              return_when=futures.FIRST_COMPLETED)
+                for f in done:
+                    prioritized_url = sensor_futures.pop(f)
+                    data = prioritized_url.data
+                    self.log.info(f'sensor done for {data}')
+
+                    # check the result and re-enqueue if successful
+                    if f.result:
+                        now = datetime.now().timestamp()
+                        prio = now + data['repeat']
+                        self.log.debug(f'Successful scrape for {data["url"]}, '
+                                       f'requeueing with priority {prio}')
+                        self.queue.put(PrioritizedUrl(data, prio))
+                    else:
+                        self.log.error(f'Scrape for {data} returned an error, '
+                                       'dropping')
+
+                for data in get_queue_slice(self.queue, len(done)):
+                    f = thread_pool.submit(worker, data, worker_context)
+                    sensor_futures[f] = data
+
+            self.log.info('Seems like we\'re done here, bye')
 
     def handle_sigusr1(self, _signum, _frame):
         self.log.info('Received SIGUSR1, reloading config...')
+        self.load_config()
 
     def handle_sigterm(self, _signum, _frame):
         self.log.info('Received SIGTERM, exiting...')
@@ -106,9 +190,9 @@ class Sensors(object):
         exit(0)
 
 
-def start():
+def start(args):
 
-    sensors = Sensors()
+    sensors = Sensors(args)
     sig_handlers = {
         signal.SIGUSR1: sensors.handle_sigusr1,
         signal.SIGTERM: sensors.handle_sigterm,
@@ -117,19 +201,17 @@ def start():
     cwd = os.getcwd()
     print(f'setup done, starting daemon now with work_dir {cwd}')
 
-    try:
-        with daemon.DaemonContext(
-            umask=0o002,
-            pidfile=PIDLockFile(PID_FILE_PATH, timeout=5),
-            signal_map=sig_handlers,
-            working_directory=cwd,
-        ):
-            sensors.run()
-    except Exception:
-        print('caught expcetion')
+    with daemon.DaemonContext(
+        umask=0o002,
+        pidfile=PIDLockFile(PID_FILE_PATH, timeout=5),
+        signal_map=sig_handlers,
+        working_directory=cwd,
+        prevent_core=False,
+    ):
+        sensors.run()
 
 
-def stop():
+def stop(args):
     pid = _get_pid(PID_FILE_PATH)
     if pid:
         os.kill(pid, signal.SIGTERM)
@@ -137,12 +219,12 @@ def stop():
         print(f'{NAME}: NOT running')
 
 
-def restart():
-    stop()
-    start()
+def restart(args):
+    stop(args)
+    start(args)
 
 
-def status():
+def status(args):
     pid = _get_pid(PID_FILE_PATH)
     if pid:
         print(f'{NAME}: running as pid {pid}')
@@ -150,12 +232,17 @@ def status():
         print(f'{NAME}: NOT running')
 
 
-def reload():
+def reload(args):
     pid = _get_pid(PID_FILE_PATH)
     if pid:
         os.kill(pid, signal.SIGUSR1)
     else:
         print(f'{NAME}: NOT running')
+
+
+# TODO either implement or remove this and the argparser command
+def add(args):
+    pass
 
 
 def _get_pid(pidfile_path):
