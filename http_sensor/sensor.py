@@ -113,6 +113,33 @@ def get_queue_slice(q, max_num=32):
             return
 
 
+class MyKafkaProducer(object):
+
+    def __init__(self, kafka_conf, log):
+        self.log = log
+        bootstrap_urls = kafka_conf.get('bootstrap_urls', [])
+        self.topic = kafka_conf.get('topic', '')
+        key_file = kafka_conf.get('key_file')
+        cert_file = kafka_conf.get('cert_file')
+        ca_file = kafka_conf.get('ca_file')
+        self.prod = KafkaProducer(
+            bootstrap_servers=bootstrap_urls,
+            ssl_keyfile=key_file,
+            ssl_certfile=cert_file,
+            ssl_cafile=ca_file,
+            security_protocol='SSL',
+            value_serializer=lambda msg: pickle.dumps(msg),
+        )
+        self.log.info('Successfully created KafkaProducer')
+
+    def send(self, message: tuple):
+        self.log.debug(f'Sending message {message} to Kafka')
+        try:
+            self.prod.send(self.topic, value=message)
+        except Exception as e:
+            self.log.error(f'Sending to Kafka failed: {e}')
+
+
 class Sensors(object):
 
     # make sure there is always a queue
