@@ -1,0 +1,16 @@
+urls:
+  - url: https://shibboleth-english.com
+    repeat: 15
+  - url: https://shibboleth-english.com/about-me/
+    repeat: 15
+    regex: Thurgood
+  - url: https://annewenkel.com
+    repeat: 15
+kafka:
+  bootstrap_urls:
+    - jan-http-sensor-fajerski-ffc7.aivencloud.com:17815
+  topic: jans-http-sensor
+  key_file: key.key
+  cert_file: cert.pem
+  ca_file: ca.pem
+
