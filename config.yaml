@@ -1,6 +1,11 @@
 urls:
-  - url: https://shibboleth-english.com
-    repeat: 15
-    regex: some*regex
-  - url: https://annewenkel.com
-    repeat: 15
+  - url: <URL>
+    repeat: 15 # repeat interval in seconds
+kafka:
+  bootstrap_urls:
+    - <Kafka URL>
+  topic: topic
+  key_file: key.key # key to connect to Kafka
+  cert_file: cert.pem # certificate to connect to Kafka
+  ca_file: ca.pem # CA to connect to Kafka
+
