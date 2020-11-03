@@ -43,6 +43,60 @@ def setup_logging(level):
     return log
 
 
+# test if worker takes correct code paths on various errors
+def worker(prio_url, config):
+    '''
+    This does the actual work.
+    We send out http request, process the results, send it off to kafka.
+    Returns the data item on sucess or an error.
+    It is considered an error if we don't send anything to kafka. HTTP errors
+    are generally sent to kafka. We don't send anything if no request is sent,
+    e.g. the url is invalid.
+    Returns a boolean signaling whether the work item should be rescheduled or
+    not. E.g. we don't want to reschedule an invalid URL.
+    '''
+    log = config.get('log')
+    log.debug('Worker found logger')
+    try:
+        wait_until = prio_url.priority
+        url = prio_url.data['url']
+        if wait_until:
+            wait_time = wait_until - datetime.now().timestamp()
+            log.info(f'Waiting {wait_time} seconds')
+            time.sleep(wait_time)
+        try:
+            response = requests.get(url)
+        except requests.exceptions.InvalidURL as e_url:
+            log.error(f'Worker caught {e_url}, returning False')
+            return False
+        except requests.exceptions.RequestException as e_req:
+            log.error(f'Worker caught {e_req.get("message", e_req)}')
+            return True
+
+        elapsed = response.elapsed.total_seconds()
+        status_code = response.status_code
+        log.debug(f'Request to {url} got response {status_code}, '
+                  f'took {elapsed} seconds')
+
+        regex_match = False
+        if 'regex' in prio_url.data and prio_url.data['regex']:
+            regex = prio_url.data['regex']
+            matches = regex.search(response.text)
+            if matches:
+                log.debug(f'worker found regex in response from {url}')
+                regex_match = True
+            else:
+                log.debug(f'worker regex NOT found in response from {url}')
+
+        kafka_prod = config.get('kafka_producer')
+        if kafka_prod:
+            kafka_prod.send((url, status_code, elapsed, regex_match))
+        return True
+    except Exception as e:
+        log.error(f'Worker raised uncaught exception: {e}, returning False')
+        return False
+
+
 # test that we never get more then max_num and that it returns on empty
 def get_queue_slice(q, max_num=32):
     '''
