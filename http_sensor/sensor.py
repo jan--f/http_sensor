@@ -55,6 +55,13 @@ def setup_logging(level):
     return log
 
 
+def get_current_timestamp():
+    '''
+    Just return the timestamp of now. Easier to mock in testing
+    '''
+    return datetime.now().timestamp()
+
+
 # test if worker takes correct code paths on various errors
 def worker(prio_url, config):
     '''
@@ -74,9 +81,10 @@ def worker(prio_url, config):
         wait_until = prio_url.priority
         url = prio_url.data['url']
         if wait_until:
-            wait_time = wait_until - datetime.now().timestamp()
-            log.info(f'Waiting {wait_time} seconds')
-            time.sleep(wait_time)
+            wait_time = wait_until - get_current_timestamp()
+            if wait_time >= 0:
+                log.info(f'Waiting {wait_time} seconds')
+                time.sleep(wait_time)
         try:
             response = requests.get(url)
         except requests.exceptions.InvalidURL as e_url:
@@ -286,7 +294,7 @@ class Sensors:
 
                     # check the result and re-enqueue if successful
                     if s_future.result:
-                        now = datetime.now().timestamp()
+                        now = get_current_timestamp()
                         prio = now + data['repeat']
                         self.log.debug('Successful scrape for %s, '
                                        'requeueing with priority %s',
