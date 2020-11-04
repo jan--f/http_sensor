@@ -62,6 +62,29 @@ def get_current_timestamp():
     return datetime.now().timestamp()
 
 
+def process_requests_response(response, prio_url, log):
+    '''
+    Gather our data from the response, match regex is we have one and return
+    the msg to kafka.
+    '''
+    url = prio_url.data['url']
+    elapsed = response.elapsed.total_seconds()
+    status_code = response.status_code
+    log.debug('Request to %s got response %s, '
+              'took %s seconds', url, status_code, elapsed)
+
+    regex_match = False
+    if 'regex' in prio_url.data and prio_url.data['regex']:
+        regex = prio_url.data['regex']
+        matches = regex.search(response.text)
+        if matches:
+            log.debug('worker found regex in response from %s', url)
+            regex_match = True
+        else:
+            log.debug('worker regex NOT found in response from %s', url)
+    return (url, status_code, elapsed, regex_match)
+
+
 # test if worker takes correct code paths on various errors
 def worker(prio_url, config):
     '''
@@ -83,38 +106,25 @@ def worker(prio_url, config):
         if wait_until:
             wait_time = wait_until - get_current_timestamp()
             if wait_time >= 0:
-                log.info(f'Waiting {wait_time} seconds')
+                log.info('Waiting %s seconds', wait_time)
                 time.sleep(wait_time)
         try:
             response = requests.get(url)
         except requests.exceptions.InvalidURL as e_url:
-            log.error(f'Worker caught {e_url}, returning False')
+            log.error('Worker caught %s, returning False', e_url)
             return False
         except requests.exceptions.RequestException as e_req:
-            log.error(f'Worker caught {e_req}')
+            log.error('Worker caught %s', e_req)
             return True
 
-        elapsed = response.elapsed.total_seconds()
-        status_code = response.status_code
-        log.debug(f'Request to {url} got response {status_code}, '
-                  f'took {elapsed} seconds')
-
-        regex_match = False
-        if 'regex' in prio_url.data and prio_url.data['regex']:
-            regex = prio_url.data['regex']
-            matches = regex.search(response.text)
-            if matches:
-                log.debug(f'worker found regex in response from {url}')
-                regex_match = True
-            else:
-                log.debug(f'worker regex NOT found in response from {url}')
+        kafka_msg = process_requests_response(response, prio_url, log)
 
         kafka_prod = config.get('kafka_producer')
         if kafka_prod:
-            kafka_prod.send((url, status_code, elapsed, regex_match))
+            kafka_prod.send(kafka_msg)
         return True
     except Exception as e:
-        log.error(f'Worker raised uncaught exception: {e}, returning False')
+        log.error('Worker raised uncaught exception: %s, returning False', e)
         return False
 
 
