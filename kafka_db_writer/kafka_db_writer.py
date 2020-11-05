@@ -3,15 +3,14 @@ This implements a Kafka consumer that writes messages to a databas
 '''
 
 import os
-import pathlib
 import pickle
 import signal
+import time
 
 from concurrent import futures
 
 import daemon  # type: ignore
 import psycopg2 as db  # type: ignore
-import yaml
 
 from kafka import KafkaConsumer  # type: ignore
 from pidlockfile import PIDLockFile  # type: ignore
@@ -20,8 +19,6 @@ from common import helpers
 
 
 NAME = 'kafka-db-writer'
-PID_FILE_PATH = f'/tmp/{NAME}.pid'
-LOG_FILE_PATH = f'/tmp/{NAME}.log'
 
 
 class DBWriter:
@@ -56,6 +53,9 @@ class DBWriter:
         self.conn.close()
 
     def write_message(self, msg):
+        '''
+        Write message to all db tables
+        '''
         with self.conn.cursor() as cursor:
             for table_name in self.tables:
                 cursor.execute(self.insert, (table_name,) + msg)
@@ -100,25 +100,29 @@ def kafka_worker(config):
         log.info('Attempting to subscribe to topic %s', topic)
         consumer.subscribe(topics=[topic])
 
+        log.debug('Kafka worker entering poll loop')
         while True:
-            log.debug('Kafka worker entering poll loop')
-            msg_dict = consumer.poll(timeout_ms=5000)
+            msg_dict = consumer.poll()
             log.debug('Kafka worker poll returned with %s', msg_dict)
             if topic in msg_dict:
                 msgs = msg_dict[topic]
+
                 log.info('Recevied %s messages on topic %s', len(msgs), topic)
 
                 for msg in msgs:
                     # write to db and commit to kafka after
                     log.debug('Storing message %s)', msg)
                     db_writer.write_message(msg)
+            else:
+                log.info('Got no message, sleeping for a bit')
+                time.sleep(1)
 
     except Exception as e:
         log.error('Kafka worker raised uncaught exception: %s',
                   getattr(e, "message", e))
 
 
-class KafkaDBWriters:
+class KafkaDBWriters(helpers.DaemonThreadRunner):
     '''
     Create and manage a bunch of Kafka writers.
     '''
@@ -127,33 +131,6 @@ class KafkaDBWriters:
     kafka_config = None
     # and create the db_config name
     db_config = None
-    # initialize log name
-    log = None
-
-    def __init__(self, args):
-        self.args = args
-
-    def run(self):
-        '''
-        Defer some setup work that would belong in the ctor.
-        As the ctor is called before daemonizing (we need to pass our signal
-        handler to DaemonContext), doing this in the ctor would close our log
-        file handle. Seems more awkward to wrestle the file handle from
-        logging in order to whitelist it..
-        Catches Exception for logging when running as a daemon.
-        '''
-        self.log = helpers.setup_logging(NAME,
-                                         self.args.log_level,
-                                         LOG_FILE_PATH)
-
-        self.load_config()
-
-        try:
-            self.start()
-        except Exception as e:
-            self.log.critical('Caught unhandled exception: %s', e)
-            self.log.error('Exiting')
-            exit(1)
 
     def load_config(self):
         '''
@@ -164,21 +141,7 @@ class KafkaDBWriters:
         '''
         conf = {}
         try:
-            # read and parse the config file
-            config_file_path = self.args.config
-            config_file_location = pathlib.PosixPath(config_file_path).absolute()
-            self.log.debug('loading config file at %s', config_file_path)
-            try:
-                with open(config_file_location) as file_:
-                    conf = yaml.safe_load(file_)
-            except yaml.YAMLError as e_yml:
-                self.log.error('Can\'t reload config at %s: %s',
-                               config_file_location, {e_yml})
-                return
-            except OSError as e_os:
-                self.log.error('Can\'t open config at %s: %s',
-                               config_file_location, e_os)
-                return
+            conf = self._load_and_parse_config_file()
 
             # attempt to create our Kafka producer
             self.kafka_config = conf.get('kafka', {})
@@ -189,12 +152,19 @@ class KafkaDBWriters:
             self.log.error('Due to error above config was only partially '
                            'reloaded: %s', conf)
 
-    def _submit_work(self, thread_pool, worker_num, config):
+    def _submit_work(self, worker_num, config):
         '''
         Only log and submit here
         '''
-        self.log.debug('Starting kafka consumer %s', worker_num)
-        return thread_pool.submit(kafka_worker, config)
+        k_futures = []
+        try:
+            for _i in range(worker_num):
+                self.log.debug('Starting kafka consumer %s', _i)
+                k_futures.append(self.thread_pool.submit(kafka_worker, config))
+        except RuntimeError:
+            self.log.debug('thread_pool submit failed, maybe we\'re '
+                           'shutting down')
+        return k_futures
 
     def start(self):
         '''
@@ -202,51 +172,33 @@ class KafkaDBWriters:
         So far this is a static worker pool.
         '''
         self.log.debug('Starting threadpool')
-        # TODO make this self adjusting. consumers now if they have none or too
-        # many partitions assigned. have them stop, return how many parts they
-        # worked on and start noew threads accordingly...or not
+        # TODO make this self adjusting. can consumers know if they have none
+        # or too # many partitions assigned? have them stop, return how many
+        # parts they worked on and start now threads accordingly...or not
         initial_consumer_count = 8
-        with futures.ThreadPoolExecutor(max_workers=initial_consumer_count) as thread_pool:
-            worker_context = {
-                'log': self.log,
-                'kafka_config': self.kafka_config,
-                'db_config': self.db_config,
-            }
-            kafka_futures = [
-                self._submit_work(thread_pool, i, worker_context) for i in
-                range(initial_consumer_count)]
+        worker_context = {
+            'log': self.log,
+            'kafka_config': self.kafka_config,
+            'db_config': self.db_config,
+        }
+        kafka_futures = self._submit_work(initial_consumer_count,
+                                          worker_context)
 
-            while kafka_futures:
-                done, _working = futures.wait(
-                    kafka_futures,
-                    return_when=futures.FIRST_COMPLETED)
-                for k_future in done:
-                    kafka_futures.remove(k_future)
-                    self.log.info('kafka writer done')
+        while kafka_futures:
+            # additional_workers = 0
+            done, _working = futures.wait(
+                kafka_futures,
+                return_when=futures.FIRST_COMPLETED)
+            for k_future in done:
+                kafka_futures.remove(k_future)
+                self.log.info('kafka writer done')
 
-                    # check the result and maybe queue up two new workers
-                    if k_future.result:
-                        pass
-                    else:
-                        self.log.error('kafka worker didn\'t have a partition'
-                                       'assigned')
+                # check the result and maybe queue up two new workers
+                # additional_workers += k_future.result()
+                # kafka_futures.extend(self._submit_work(additional_workers,
+                #                                        worker_context))
 
-            self.log.info('Seems like we\'re done here, bye')
-
-    def handle_sigusr1(self, _signum, _frame):
-        '''
-        Reload config on SIGUSR1
-        '''
-        self.log.info('Received SIGUSR1, reloading config...')
-        self.load_config()
-
-    def handle_sigterm(self, _signum, _frame):
-        '''
-        On SIGTERM remove pid file and log exit.
-        '''
-        self.log.info('Received SIGTERM, exiting...')
-        os.remove(PID_FILE_PATH)
-        exit(0)
+        self.log.info('Seems like we\'re done here, bye')
 
 
 def start(args):
@@ -254,10 +206,9 @@ def start(args):
     Daemon interface - start the dameon
     '''
 
-    k_db_writers = KafkaDBWriters(args)
+    k_db_writers = KafkaDBWriters(NAME, args)
     sig_handlers = {
         signal.SIGUSR1: k_db_writers.handle_sigusr1,
-        signal.SIGTERM: k_db_writers.handle_sigterm,
     }
 
     cwd = os.getcwd()
@@ -265,7 +216,7 @@ def start(args):
 
     with daemon.DaemonContext(
         umask=0o002,
-        pidfile=PIDLockFile(PID_FILE_PATH, timeout=5),
+        pidfile=PIDLockFile(args.pid_file, timeout=5),
         signal_map=sig_handlers,
         working_directory=cwd,
         prevent_core=False,
@@ -273,13 +224,14 @@ def start(args):
         k_db_writers.run()
 
 
-def stop(_args):
+def stop(args):
     '''
     Daemon interface - stop the dameon
     '''
-    pid = _get_pid(PID_FILE_PATH)
+    pid = _get_pid(args.pid_file)
     if pid:
         os.kill(pid, signal.SIGTERM)
+        helpers._wait_for_shutdown_or_kill(pid)
     else:
         print(f'{NAME}: NOT running')
 
@@ -292,22 +244,22 @@ def restart(args):
     start(args)
 
 
-def status(_args):
+def status(args):
     '''
     Daemon interface - check if the dameon is running
     '''
-    pid = _get_pid(PID_FILE_PATH)
+    pid = _get_pid(args.pid_file)
     if pid:
         print(f'{NAME}: running as pid {pid}')
     else:
         print(f'{NAME}: NOT running')
 
 
-def reload(_args):
+def reload(args):
     '''
     Daemon interface - send SIGUSR1 to the dameon
     '''
-    pid = _get_pid(PID_FILE_PATH)
+    pid = _get_pid(args.pid_file)
     if pid:
         os.kill(pid, signal.SIGUSR1)
     else:

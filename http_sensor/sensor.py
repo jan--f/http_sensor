@@ -2,13 +2,10 @@
 This implements the actual sensor.
 '''
 
-import logging
 import os
-import pathlib
 import pickle
 import re
 import signal
-import sys
 import time
 
 from concurrent import futures
@@ -18,15 +15,14 @@ from queue import PriorityQueue, Empty as QueueEmpty
 
 import daemon  # type: ignore
 import requests
-import yaml
 
 from kafka import KafkaProducer  # type: ignore
 from pidlockfile import PIDLockFile  # type: ignore
 
+from common import helpers  # type: ignore
+
 
 NAME = 'sensor'
-PID_FILE_PATH = f'/tmp/http_{NAME}.pid'
-LOG_FILE_PATH = f'/tmp/http_{NAME}.log'
 
 
 @dataclass(order=True)
@@ -38,21 +34,6 @@ class PrioritizedUrl:
     '''
     data: dict = field(compare=False)
     priority: int = field(default=0)
-
-
-def setup_logging(level):
-    '''
-    logging setup with the requested level.
-    '''
-    log = logging.getLogger(NAME)
-    log.setLevel(getattr(logging, level, logging.INFO))
-    f_handler = logging.FileHandler(LOG_FILE_PATH)
-    f_handler.setLevel(getattr(logging, level, logging.INFO))
-    log_format = '%(asctime)s|%(levelname)s|%(message)s'
-    f_handler.setFormatter(logging.Formatter(log_format))
-    log.addHandler(f_handler)
-    log.debug('Done setting up logging')
-    return log
 
 
 def get_current_timestamp():
@@ -82,6 +63,7 @@ def process_requests_response(response, prio_url, log):
             regex_match = True
         else:
             log.debug('worker regex NOT found in response from %s', url)
+    # use a Namedtuple here
     return (url, status_code, elapsed, regex_match)
 
 
@@ -177,7 +159,7 @@ class MyKafkaProducer:
             self.log.error(f'Sending to Kafka failed: {e}')
 
 
-class Sensors:
+class Sensors(helpers.DaemonThreadRunner):
     '''
     The daemon process, that runs our sensor workers.
     It is responsible for the setup (logging, config loading and such) and to
@@ -190,31 +172,6 @@ class Sensors:
     queue: PriorityQueue = PriorityQueue()
     # and create the kafka_prod name
     kafka_prod = None
-    # initialize log name
-    log = None
-
-    def __init__(self, args):
-        self.args = args
-
-    def run(self):
-        '''
-        Defer some setup work that would belong in the ctor.
-        As the ctor is called before daemonizing (we need to pass our signal
-        handler to DaemonContext), doing this in the ctor would close our log
-        file handle. Seems more awkward to wrestle the file handle from
-        logging in order to whitelist it..
-        Catches Exception for logging when running as a daemon.
-        '''
-        self.log = setup_logging(self.args.log_level)
-
-        self.load_config()
-
-        try:
-            self.start_sensors()
-        except Exception as e:
-            self.log.critical('Caught unhandled exception: %s', e)
-            self.log.error('Exiting')
-            sys.exit(1)
 
     def load_config(self):
         '''
@@ -225,26 +182,13 @@ class Sensors:
         '''
         conf = {}
         try:
-            # read and parse the config file
-            config_file_path = self.args.config
-            config_file_location = pathlib.PosixPath(config_file_path).absolute()
-            self.log.debug('loading config file at %s', config_file_path)
-            try:
-                with open(config_file_location) as file_:
-                    conf = yaml.safe_load(file_)
-            except yaml.YAMLError as e_yml:
-                self.log.error('Can\'t reload config at %s: %s',
-                               config_file_location, {e_yml})
-                return
-            except OSError as e_os:
-                self.log.error('Can\'t open config at %s: %s',
-                               config_file_location, e_os)
-                return
+            conf = self._load_and_parse_config_file()
 
             # load our urls and if successful populate the inital queue.
             urls = conf.get('urls', [])
             if not isinstance(urls, list):
-                self.log.error('Expected a list under \'urls\' key, abort config load')
+                self.log.error('Expected a list under \'urls\' key, '
+                               'abort config load')
                 return
             self.log.info('Found %s urls, will process now', len(urls))
             new_queue = PriorityQueue()
@@ -267,15 +211,18 @@ class Sensors:
             self.log.error('Due to error above config was only partially '
                            'reloaded: %s', conf)
 
-    def _submit_work(self, thread_pool, data, config):
+    def _submit_work(self, data_items, config):
         '''
         Only log and submit here
         '''
-        self.log.debug('Starting on work item %s', data)
-        return thread_pool.submit(worker, data, config)
+        s_futures = {}
+        for data in data_items:
+            self.log.debug('Starting on work item %s', data)
+            s_futures[self.thread_pool.submit(worker, data, config)] = data
+        return s_futures
 
     # test that things get rescheduled
-    def start_sensors(self):
+    def start(self):
         '''
         Start a thread pool of sensor workers. Initially start as many workers
         as `get_queue_slice` returns. Then re-schedule workers as mor items
@@ -283,67 +230,50 @@ class Sensors:
         When the queue doesn't return any more items, we consider ourselfes
         done.
         '''
-        self.log.info('Starting threadpool')
-        with futures.ThreadPoolExecutor() as thread_pool:
-            worker_context = {
-                'log': self.log,
-                'kafka_producer': self.kafka_prod,
-            }
-            sensor_futures = {
-                self._submit_work(thread_pool, data, worker_context): data for
-                data in get_queue_slice(self.queue)}
+        self.log.debug('Starting threadpool')
+        worker_context = {
+            'log': self.log,
+            'kafka_producer': self.kafka_prod,
+        }
 
-            while sensor_futures:
-                done, _working = futures.wait(
-                    sensor_futures,
-                    return_when=futures.FIRST_COMPLETED)
-                for s_future in done:
-                    prioritized_url = sensor_futures.pop(s_future)
-                    data = prioritized_url.data
-                    self.log.info('sensor done for %s', data)
+        sensor_futures = self._submit_work(
+            get_queue_slice(self.queue, self.args.max_workers),
+            worker_context)
 
-                    # check the result and re-enqueue if successful
-                    if s_future.result:
-                        now = get_current_timestamp()
-                        prio = now + data['repeat']
-                        self.log.debug('Successful scrape for %s, '
-                                       'requeueing with priority %s',
-                                       data["url"], prio)
-                        self.queue.put(PrioritizedUrl(data, prio))
-                    else:
-                        self.log.error('Scrape for %s returned an error, '
-                                       'dropping', data)
+        while sensor_futures:
+            done, _working = futures.wait(
+                sensor_futures,
+                return_when=futures.FIRST_COMPLETED)
+            for s_future in done:
+                prioritized_url = sensor_futures.pop(s_future)
+                data = prioritized_url.data
+                self.log.info('sensor done for %s', data)
 
-                for data in get_queue_slice(self.queue, len(done)):
-                    worker_future = thread_pool.submit(worker,
-                                                       data,
-                                                       worker_context)
-                    sensor_futures[worker_future] = data
+                # check the result and re-enqueue if successful
+                if s_future.result:
+                    now = get_current_timestamp()
+                    prio = now + data['repeat']
+                    self.log.debug('Successful scrape for %s, '
+                                   'requeueing with priority %s',
+                                   data["url"], prio)
+                    self.queue.put(PrioritizedUrl(data, prio))
+                else:
+                    self.log.error('Scrape for %s returned an error, '
+                                   'dropping', data)
 
-            self.log.info('Seems like we\'re done here, bye')
+            additional_futures = self._submit_work(
+                get_queue_slice(self.queue, len(done)),
+                worker_context)
+            sensor_futures.update(additional_futures)
 
-    def handle_sigusr1(self, _signum, _frame):
-        '''
-        Reload config on SIGUSR1
-        '''
-        self.log.info('Received SIGUSR1, reloading config...')
-        self.load_config()
-
-    def handle_sigterm(self, _signum, _frame):
-        '''
-        On SIGTERM remove pid file and log exit.
-        '''
-        self.log.info('Received SIGTERM, exiting...')
-        os.remove(PID_FILE_PATH)
-        sys.exit(0)
+        self.log.info('Seems like we\'re done here, bye')
 
 
 def start(args):
 
-    sensors = Sensors(args)
+    sensors = Sensors(NAME, args)
     sig_handlers = {
         signal.SIGUSR1: sensors.handle_sigusr1,
-        signal.SIGTERM: sensors.handle_sigterm,
     }
 
     cwd = os.getcwd()
@@ -351,7 +281,7 @@ def start(args):
 
     with daemon.DaemonContext(
         umask=0o002,
-        pidfile=PIDLockFile(PID_FILE_PATH, timeout=5),
+        pidfile=PIDLockFile(args.pid_file, timeout=5),
         signal_map=sig_handlers,
         working_directory=cwd,
         prevent_core=False,
@@ -360,9 +290,10 @@ def start(args):
 
 
 def stop(args):
-    pid = _get_pid(PID_FILE_PATH)
+    pid = helpers._get_pid(args.pid_file)
     if pid:
         os.kill(pid, signal.SIGTERM)
+        helpers._wait_for_shutdown_or_kill(pid)
     else:
         print(f'{NAME}: NOT running')
 
@@ -373,7 +304,7 @@ def restart(args):
 
 
 def status(args):
-    pid = _get_pid(PID_FILE_PATH)
+    pid = helpers._get_pid(args.pid_file)
     if pid:
         print(f'{NAME}: running as pid {pid}')
     else:
@@ -381,7 +312,7 @@ def status(args):
 
 
 def reload(args):
-    pid = _get_pid(PID_FILE_PATH)
+    pid = helpers._get_pid(args.pid_file)
     if pid:
         os.kill(pid, signal.SIGUSR1)
     else:
@@ -391,8 +322,3 @@ def reload(args):
 # TODO either implement or remove this and the argparser command
 def add(args):
     pass
-
-
-def _get_pid(pidfile_path):
-    pidfile = PIDLockFile(pidfile_path)
-    return pidfile.is_locked()
