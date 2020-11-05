@@ -35,6 +35,49 @@ def data_item():
     return MagicMock(priority=1, data=MagicMock())
 
 
+@patch('common.helpers.logging')
+@patch('http_sensor.sensor.worker')
+def test_sensor_no_rescheduling_all_false(mocked_worker, mocked_logging):
+    mocked_worker.return_value = False
+    args = MagicMock(
+        max_workers=8,
+        log_level='DEBUG'
+    )
+    sens = sensor.Sensors('test_sensor', args)
+    sens.load_config = MagicMock()
+    p_queue = PriorityQueue()
+    mocked_data = {
+        'repeat': 2,
+        'url': 'foo'
+    }
+    [p_queue.put(sensor.PrioritizedUrl(mocked_data, 1)) for i in range(100)]
+    sens.queue = p_queue
+    sens.run()
+    mocked_worker.assert_called()
+
+
+@patch('common.helpers.logging')
+@patch('http_sensor.sensor.worker')
+def test_sensor_rescheduling_exactly_n(mocked_worker, mocked_logging):
+
+    mocked_worker.side_effect = [True, False]
+    args = MagicMock(
+        max_workers=1,
+        log_level='DEBUG'
+    )
+    sens = sensor.Sensors('test_sensor', args)
+    sens.load_config = MagicMock()
+    p_queue = PriorityQueue()
+    mocked_data = {
+        'repeat': 1,
+        'url': 'foo'
+    }
+    p_queue.put(sensor.PrioritizedUrl(mocked_data, 1))
+    sens.queue = p_queue
+    sens.run()
+    mocked_worker.assert_called()
+
+
 @patch('http_sensor.sensor.get_current_timestamp')
 @patch('http_sensor.sensor.requests.get')
 @given(sleep_until=st.floats(min_value=0.1))

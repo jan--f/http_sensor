@@ -251,7 +251,7 @@ class Sensors(helpers.DaemonThreadRunner):
                 self.log.info('sensor done for %s', data)
 
                 # check the result and re-enqueue if successful
-                if s_future.result:
+                if s_future.result():
                     now = get_current_timestamp()
                     prio = now + data['repeat']
                     self.log.debug('Successful scrape for %s, '
