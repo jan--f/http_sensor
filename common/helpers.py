@@ -53,22 +53,6 @@ class DaemonThreadRunner:
             self.log.error('Exiting')
             exit(1)
 
-    def _load_and_parse_config_file(self):
-        # read and parse the config file
-        config_file_path = self.args.config
-        config_file_location = pathlib.PosixPath(config_file_path).absolute()
-        self.log.debug('loading config file at %s', config_file_path)
-        try:
-            with open(config_file_location) as file_:
-                return yaml.safe_load(file_)
-        except yaml.YAMLError as e_yml:
-            self.log.error('Can\'t reload config at %s: %s',
-                           config_file_location, {e_yml})
-        except OSError as e_os:
-            self.log.error('Can\'t open config at %s: %s',
-                           config_file_location, e_os)
-            return {}
-
     def setup_logging(self):
         '''
         logging setup with the requested level.
@@ -101,6 +85,23 @@ class DaemonThreadRunner:
         '''
         self.log.info('Received SIGUSR1, reloading config...')
         self.load_config()
+
+
+def _load_and_parse_config_file(config, log):
+    # read and parse the config file
+    config_file_path = config
+    config_file_location = pathlib.PosixPath(config_file_path).absolute()
+    log.debug('loading config file at %s', config_file_path)
+    try:
+        with open(config_file_location) as file_:
+            return yaml.safe_load(file_)
+    except yaml.YAMLError as e_yml:
+        log.error('Can\'t reload config at %s: %s',
+                  config_file_location, {e_yml})
+    except OSError as e_os:
+        log.error('Can\'t open config at %s: %s',
+                  config_file_location, e_os)
+        return {}
 
 
 def _wait_for_shutdown_or_kill(pid):

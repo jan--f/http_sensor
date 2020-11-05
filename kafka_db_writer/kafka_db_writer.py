@@ -141,7 +141,8 @@ class KafkaDBWriters(helpers.DaemonThreadRunner):
         '''
         conf = {}
         try:
-            conf = self._load_and_parse_config_file()
+            conf = helpers._load_and_parse_config_file(self.args.config,
+                                                       self.log)
 
             # attempt to create our Kafka producer
             self.kafka_config = conf.get('kafka', {})
