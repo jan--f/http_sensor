@@ -16,15 +16,11 @@ commands =
 
 [testenv:pylint]
 deps = pylint
-commands = pylint --exit-zero http_sensor http_sensor_ctl
+commands = pylint --exit-zero http_sensor http_sensor_ctl kafka_db_writer
 
 [testenv:mypy]
 basepython = python3
 deps =
     mypy
-commands =
-    mypy    http_sensor_ctl/__init__.py \
-            http_sensor/sensor.py
-
-    ; --config-file=../../mypy.ini \
+commands = mypy http_sensor kafka_db_writer
 """
