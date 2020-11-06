@@ -177,22 +177,8 @@ class KafkaDBWriters(helpers.DaemonThreadRunner):
             'kafka_config': self.kafka_config,
             'db_config': self.db_config,
         }
-        kafka_futures = self._submit_work(initial_consumer_count,
-                                          worker_context)
-
-        while kafka_futures:
-            # additional_workers = 0
-            done, _working = futures.wait(
-                kafka_futures,
-                return_when=futures.FIRST_COMPLETED)
-            for k_future in done:
-                kafka_futures.remove(k_future)
-                self.log.info('kafka writer done')
-
-                # check the result and maybe queue up two new workers
-                # additional_workers += k_future.result()
-                # kafka_futures.extend(self._submit_work(additional_workers,
-                #                                        worker_context))
+        self._submit_work(initial_consumer_count,
+                          worker_context)
 
         self.log.info('Seems like we\'re done here, bye')
 
