@@ -11,6 +11,7 @@ envlist = pylint, py3, mypy
 deps =
     pytest
     hypothesis
+    psycopg2-binary # not sure why this is needed
 commands =
     pytest {posargs:test}
 
