@@ -93,7 +93,7 @@ def kafka_worker(config):
             security_protocol='SSL',
             value_deserializer=pickle.loads,
             group_id='sensor-consumers',
-            enable_auto_commit=True,  # we might wanna do out own committing
+            enable_auto_commit=False,  # we commit after db write
         )
         log.info('Successfully created KafkaProducer')
 
@@ -111,8 +111,10 @@ def kafka_worker(config):
 
                 for msg in msgs:
                     # write to db and commit to kafka after
-                    log.debug('Storing message %s)', msg)
+                    log.debug('Storing message %s', msg)
                     db_writer.write_message(msg)
+                    consumer.commit()
+                    log.debug('Committed message %s to Kafka', msg)
             else:
                 log.info('Got no message, sleeping for a bit')
                 time.sleep(1)
