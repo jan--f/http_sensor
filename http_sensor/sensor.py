@@ -11,7 +11,6 @@ import time
 
 from concurrent import futures
 from dataclasses import dataclass, field
-from datetime import datetime
 from queue import PriorityQueue, Empty as QueueEmpty
 from typing import Tuple, Generator
 
@@ -64,13 +63,6 @@ class MyKafkaProducer:
             self.log.error(f'Sending to Kafka failed: {e}')
 
 
-def get_current_timestamp() -> float:
-    '''
-    Just return the timestamp of now. Easier to mock in testing
-    '''
-    return datetime.now().timestamp()
-
-
 def process_requests_response(response: requests.Response,
                               prio_url: PrioritizedUrl,
                               log: logging.Logger) -> Tuple[str,
@@ -120,7 +112,7 @@ def worker(prio_url: PrioritizedUrl,
         wait_until = prio_url.priority
         url = prio_url.data['url']
         if wait_until:
-            wait_time = wait_until - get_current_timestamp()
+            wait_time = wait_until - helpers.get_current_timestamp()
             if wait_time >= 0:
                 log.info('Waiting %s seconds', wait_time)
                 time.sleep(wait_time)
@@ -250,7 +242,7 @@ class Sensors(helpers.DaemonThreadRunner):
 
                 # check the result and re-enqueue if successful
                 if s_future.result():
-                    now = get_current_timestamp()
+                    now = helpers.get_current_timestamp()
                     prio = now + data['repeat']
                     self.log.debug('Successful scrape for %s, '
                                    'requeueing with priority %s',

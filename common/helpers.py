@@ -8,6 +8,7 @@ import signal
 import time
 
 from concurrent import futures
+from datetime import datetime
 from random import randint
 
 import yaml
@@ -141,9 +142,17 @@ def get_kafka_connection_details(kafka_conf):
     return con_details
 
 
+def get_current_timestamp() -> float:
+    '''
+    Just return the timestamp of now. Easier to mock in testing
+    '''
+    return datetime.now().timestamp()
+
+
 def randomize_start_time(data_item):
     '''
     Return radmon value between 0 and data_item['repeat']
     '''
     repeat = data_item.get('repeat', 0)
-    return randint(0, repeat)
+    now = int(get_current_timestamp())
+    return randint(now, repeat + now)
