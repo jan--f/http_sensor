@@ -2,6 +2,7 @@
 This implements the actual sensor.
 '''
 
+import logging
 import os
 import pickle
 import re
@@ -12,6 +13,7 @@ from concurrent import futures
 from dataclasses import dataclass, field
 from datetime import datetime
 from queue import PriorityQueue, Empty as QueueEmpty
+from typing import Tuple, Generator
 
 import daemon  # type: ignore
 import requests
@@ -34,96 +36,6 @@ class PrioritizedUrl:
     '''
     data: dict = field(compare=False)
     priority: int = field(default=0)
-
-
-def get_current_timestamp():
-    '''
-    Just return the timestamp of now. Easier to mock in testing
-    '''
-    return datetime.now().timestamp()
-
-
-def process_requests_response(response, prio_url, log):
-    '''
-    Gather our data from the response, match regex is we have one and return
-    the msg to kafka.
-    '''
-    url = prio_url.data['url']
-    elapsed = response.elapsed.total_seconds()
-    status_code = response.status_code
-    log.debug('Request to %s got response %s, '
-              'took %s seconds', url, status_code, elapsed)
-
-    regex_match = False
-    if 'regex' in prio_url.data and prio_url.data['regex']:
-        regex = prio_url.data['regex']
-        matches = regex.search(response.text)
-        if matches:
-            log.debug('worker found regex in response from %s', url)
-            regex_match = True
-        else:
-            log.debug('worker regex NOT found in response from %s', url)
-    # use a Namedtuple here
-    return (url, status_code, elapsed, regex_match)
-
-
-# test if worker takes correct code paths on various errors
-def worker(prio_url, config):
-    '''
-    This does the actual work.
-    We send out http request, process the results, send it off to kafka.
-    Returns the data item on sucess or an error.
-    It is considered an error if we don't send anything to kafka. HTTP errors
-    are generally sent to kafka. We don't send anything if no request is sent,
-    e.g. the url is invalid.
-    Returns a boolean signaling whether the work item should be rescheduled or
-    not. E.g. we don't want to reschedule an invalid URL.
-    Catches Exception for logging when running as a daemon.
-    '''
-    log = config.get('log')
-    log.debug('Worker found logger')
-    try:
-        wait_until = prio_url.priority
-        url = prio_url.data['url']
-        if wait_until:
-            wait_time = wait_until - get_current_timestamp()
-            if wait_time >= 0:
-                log.info('Waiting %s seconds', wait_time)
-                time.sleep(wait_time)
-        try:
-            response = requests.get(url)
-        except requests.exceptions.InvalidURL as e_url:
-            log.error('Worker caught %s, returning False', e_url)
-            return False
-        except requests.exceptions.RequestException as e_req:
-            log.error('Worker caught %s', e_req)
-            return True
-
-        kafka_msg = process_requests_response(response, prio_url, log)
-
-        kafka_prod = config.get('kafka_producer')
-        if kafka_prod:
-            kafka_prod.send(kafka_msg)
-        return True
-    except Exception as e:
-        log.error('Worker raised uncaught exception: %s, returning False', e)
-        return False
-
-
-# test that we never get more then max_num and that it returns on empty
-def get_queue_slice(prio_q, max_num=32):
-    '''
-    A generator that dequeues at most `max_num` items if available.
-    If the queue has nothing available it will stop.
-    '''
-    item_count = 0
-    while item_count < max_num:
-        try:
-            item = prio_q.get_nowait()
-            yield item
-            item_count += 1
-        except QueueEmpty:
-            return
 
 
 class MyKafkaProducer:
@@ -150,6 +62,101 @@ class MyKafkaProducer:
             self.prod.send(self.topic, value=message)
         except Exception as e:
             self.log.error(f'Sending to Kafka failed: {e}')
+
+
+def get_current_timestamp() -> float:
+    '''
+    Just return the timestamp of now. Easier to mock in testing
+    '''
+    return datetime.now().timestamp()
+
+
+def process_requests_response(response: requests.Response,
+                              prio_url: PrioritizedUrl,
+                              log: logging.Logger) -> Tuple[str,
+                                                            int,
+                                                            float,
+                                                            int]:
+    '''
+    Gather our data from the response, match regex is we have one and return
+    the msg to kafka.
+    '''
+    url = prio_url.data['url']
+    elapsed = response.elapsed.total_seconds()
+    status_code = response.status_code
+    log.debug('Request to %s got response %s, '
+              'took %s seconds', url, status_code, elapsed)
+
+    regex_match = False
+    if 'regex' in prio_url.data and prio_url.data['regex']:
+        regex = prio_url.data['regex']
+        matches = regex.search(response.text)
+        if matches:
+            log.debug('worker found regex in response from %s', url)
+            regex_match = True
+        else:
+            log.debug('worker regex NOT found in response from %s', url)
+    # use a Namedtuple here
+    return (url, status_code, elapsed, regex_match)
+
+
+# test if worker takes correct code paths on various errors
+def worker(prio_url: PrioritizedUrl,
+           log: logging.Logger,
+           kafka_prod: MyKafkaProducer) -> bool:
+    '''
+    This does the actual work.
+    We send out http request, process the results, send it off to kafka.
+    Returns the data item on sucess or an error.
+    It is considered an error if we don't send anything to kafka. HTTP errors
+    are generally sent to kafka. We don't send anything if no request is sent,
+    e.g. the url is invalid.
+    Returns a boolean signaling whether the work item should be rescheduled or
+    not. E.g. we don't want to reschedule an invalid URL.
+    Catches Exception for logging when running as a daemon.
+    '''
+    log.debug('Worker found logger')
+    try:
+        wait_until = prio_url.priority
+        url = prio_url.data['url']
+        if wait_until:
+            wait_time = wait_until - get_current_timestamp()
+            if wait_time >= 0:
+                log.info('Waiting %s seconds', wait_time)
+                time.sleep(wait_time)
+        try:
+            response = requests.get(url)
+        except requests.exceptions.InvalidURL as e_url:
+            log.error('Worker caught %s, returning False', e_url)
+            return False
+        except requests.exceptions.RequestException as e_req:
+            log.error('Worker caught %s', e_req)
+            return True
+
+        kafka_msg = process_requests_response(response, prio_url, log)
+
+        if kafka_prod:
+            kafka_prod.send(kafka_msg)
+        return True
+    except Exception as e:
+        log.error('Worker raised uncaught exception: %s, returning False', e)
+        return False
+
+
+# test that we never get more then max_num and that it returns on empty
+def get_queue_slice(prio_q: PriorityQueue, max_num: int) -> Generator:
+    '''
+    A generator that dequeues at most `max_num` items if available.
+    If the queue has nothing available it will stop.
+    '''
+    item_count = 0
+    while item_count < max_num:
+        try:
+            item = prio_q.get_nowait()
+            yield item
+            item_count += 1
+        except QueueEmpty:
+            return
 
 
 class Sensors(helpers.DaemonThreadRunner):
@@ -191,7 +198,8 @@ class Sensors(helpers.DaemonThreadRunner):
                     # precompile regex if present
                     url['regex'] = re.compile(url['regex'])
                     # TODO maybe introduce a random element for first scheduling
-                new_queue.put(PrioritizedUrl(url))
+                init_prio = helpers.randomize_start_time(url)
+                new_queue.put(PrioritizedUrl(url, init_prio))
             self.log.info('loaded new queue from config, '
                           'will start processing new queue')
             self.queue = new_queue
@@ -205,14 +213,15 @@ class Sensors(helpers.DaemonThreadRunner):
             self.log.error('Due to error above config was only partially '
                            'reloaded: %s', conf)
 
-    def _submit_work(self, data_items, config):
+    def _submit_work(self, data_items, log, kafka):
         '''
         Only log and submit here
         '''
         s_futures = {}
         for data in data_items:
             self.log.debug('Starting on work item %s', data)
-            s_futures[self.thread_pool.submit(worker, data, config)] = data
+            s_future = self.thread_pool.submit(worker, data, log, kafka)
+            s_futures[s_future] = data
         return s_futures
 
     # test that things get rescheduled
@@ -225,14 +234,10 @@ class Sensors(helpers.DaemonThreadRunner):
         done.
         '''
         self.log.debug('Starting threadpool')
-        worker_context = {
-            'log': self.log,
-            'kafka_producer': self.kafka_prod,
-        }
 
         sensor_futures = self._submit_work(
             get_queue_slice(self.queue, self.args.max_workers),
-            worker_context)
+            self.log, self.kafka_prod)
 
         while sensor_futures:
             done, _working = futures.wait(
@@ -257,7 +262,7 @@ class Sensors(helpers.DaemonThreadRunner):
 
             additional_futures = self._submit_work(
                 get_queue_slice(self.queue, len(done)),
-                worker_context)
+                self.log, self.kafka_prod)
             sensor_futures.update(additional_futures)
 
         self.log.info('Seems like we\'re done here, bye')

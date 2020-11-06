@@ -8,6 +8,7 @@ import signal
 import time
 
 from concurrent import futures
+from random import randint
 
 import yaml
 
@@ -88,7 +89,9 @@ class DaemonThreadRunner:
 
 
 def load_and_parse_config_file(config, log):
-    # read and parse the config file
+    '''
+    Read and parse the config file
+    '''
     config_file_path = config
     config_file_location = pathlib.PosixPath(config_file_path).absolute()
     log.debug('loading config file at %s', config_file_path)
@@ -105,6 +108,9 @@ def load_and_parse_config_file(config, log):
 
 
 def wait_for_shutdown_or_kill(pid):
+    '''
+    Wait for a process to terminate or kill it after 5 seconds
+    '''
     for _i in range(5):
         try:
             os.kill(pid, 0)
@@ -115,11 +121,17 @@ def wait_for_shutdown_or_kill(pid):
 
 
 def get_pid(pidfile_path):
+    '''
+    Return a PID from a PIDLockFile
+    '''
     pidfile = PIDLockFile(pidfile_path)
     return pidfile.is_locked()
 
 
 def get_kafka_connection_details(kafka_conf):
+    '''
+    Extract Kafka connection details from dict kafka_conf
+    '''
     con_details = {}
     con_details['bootstrap_servers'] = kafka_conf.get('bootstrap_urls', [])
     con_details['ssl_keyfile'] = kafka_conf.get('key_file')
@@ -127,3 +139,11 @@ def get_kafka_connection_details(kafka_conf):
     con_details['ssl_cafile'] = kafka_conf.get('ca_file')
     con_details['security_protocol'] = 'SSL'
     return con_details
+
+
+def randomize_start_time(data_item):
+    '''
+    Return radmon value between 0 and data_item['repeat']
+    '''
+    repeat = data_item.get('repeat', 0)
+    return randint(0, repeat)
