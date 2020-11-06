@@ -198,7 +198,8 @@ class Sensors(helpers.DaemonThreadRunner):
                     # precompile regex if present
                     url['regex'] = re.compile(url['regex'])
                     # TODO maybe introduce a random element for first scheduling
-                new_queue.put(PrioritizedUrl(url))
+                init_prio = helpers.randomize_start_time(url)
+                new_queue.put(PrioritizedUrl(url, init_prio))
             self.log.info('loaded new queue from config, '
                           'will start processing new queue')
             self.queue = new_queue

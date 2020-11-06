@@ -139,3 +139,11 @@ def get_kafka_connection_details(kafka_conf):
     con_details['ssl_cafile'] = kafka_conf.get('ca_file')
     con_details['security_protocol'] = 'SSL'
     return con_details
+
+
+def randomize_start_time(data_item):
+    '''
+    Return radmon value between 0 and data_item['repeat']
+    '''
+    repeat = data_item.get('repeat', 0)
+    return randint(0, repeat)
