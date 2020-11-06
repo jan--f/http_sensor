@@ -77,7 +77,7 @@ def test_sensor_rescheduling_exactly_n(mocked_worker, mocked_logging):
     assert mocked_worker.call_count == 2
 
 
-@patch('http_sensor.sensor.get_current_timestamp')
+@patch('http_sensor.sensor.helpers.get_current_timestamp')
 @patch('http_sensor.sensor.requests.get')
 @given(sleep_until=st.floats(min_value=0.1))
 def test_sleep_is_called_if_wait_time(_mock_get,
@@ -94,7 +94,7 @@ def test_sleep_is_called_if_wait_time(_mock_get,
         mocked_sleep.assert_called_once()
 
 
-@patch('http_sensor.sensor.get_current_timestamp')
+@patch('http_sensor.sensor.helpers.get_current_timestamp')
 @patch('http_sensor.sensor.requests.get')
 @given(sleep_until=st.floats(max_value=1))
 def test_sleep_is_not_called_if_wait_time_is_negative(_mock_get,
