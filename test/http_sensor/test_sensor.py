@@ -76,6 +76,7 @@ def test_sensor_rescheduling_exactly_n(mocked_worker, mocked_logging):
     sens.queue = p_queue
     sens.run()
     mocked_worker.assert_called()
+    assert mocked_worker.call_count == 2
 
 
 @patch('http_sensor.sensor.get_current_timestamp')
