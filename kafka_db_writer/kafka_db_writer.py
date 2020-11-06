@@ -73,11 +73,8 @@ def kafka_worker(config):
         log.debug('Kafka worker found logger')
 
         kafka_config = config.get('kafka_config')
-        bootstrap_urls = kafka_config.get('bootstrap_urls', [])
+        con_details = helpers.get_kafka_connection_details(kafka_config)
         topic = kafka_config.get('topic', '')
-        key_file = kafka_config.get('key_file')
-        cert_file = kafka_config.get('cert_file')
-        ca_file = kafka_config.get('ca_file')
 
         db_config = config.get('db_config')
         db_connect_string = db_config.get('connect')
@@ -86,14 +83,10 @@ def kafka_worker(config):
         db_writer = DBWriter(db, db_connect_string, db_tables, log)
 
         consumer = KafkaConsumer(
-            bootstrap_servers=bootstrap_urls,
-            ssl_keyfile=key_file,
-            ssl_certfile=cert_file,
-            ssl_cafile=ca_file,
-            security_protocol='SSL',
             value_deserializer=pickle.loads,
             group_id='sensor-consumers',
             enable_auto_commit=False,  # we commit after db write
+            **con_details,
         )
         log.info('Successfully created KafkaProducer')
 
@@ -143,8 +136,8 @@ class KafkaDBWriters(helpers.DaemonThreadRunner):
         '''
         conf = {}
         try:
-            conf = helpers._load_and_parse_config_file(self.args.config,
-                                                       self.log)
+            conf = helpers.load_and_parse_config_file(self.args.config,
+                                                      self.log)
 
             # attempt to create our Kafka producer
             self.kafka_config = conf.get('kafka', {})
@@ -231,10 +224,10 @@ def stop(args):
     '''
     Daemon interface - stop the dameon
     '''
-    pid = _get_pid(args.pid_file)
+    pid = helpers.get_pid(args.pid_file)
     if pid:
         os.kill(pid, signal.SIGTERM)
-        helpers._wait_for_shutdown_or_kill(pid)
+        helpers.wait_for_shutdown_or_kill(pid)
     else:
         print(f'{NAME}: NOT running')
 
@@ -251,7 +244,7 @@ def status(args):
     '''
     Daemon interface - check if the dameon is running
     '''
-    pid = _get_pid(args.pid_file)
+    pid = helpers.get_pid(args.pid_file)
     if pid:
         print(f'{NAME}: running as pid {pid}')
     else:
@@ -262,13 +255,8 @@ def reload(args):
     '''
     Daemon interface - send SIGUSR1 to the dameon
     '''
-    pid = _get_pid(args.pid_file)
+    pid = helpers.get_pid(args.pid_file)
     if pid:
         os.kill(pid, signal.SIGUSR1)
     else:
         print(f'{NAME}: NOT running')
-
-
-def _get_pid(pidfile_path):
-    pidfile = PIDLockFile(pidfile_path)
-    return pidfile.is_locked()

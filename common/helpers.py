@@ -87,7 +87,7 @@ class DaemonThreadRunner:
         self.load_config()
 
 
-def _load_and_parse_config_file(config, log):
+def load_and_parse_config_file(config, log):
     # read and parse the config file
     config_file_path = config
     config_file_location = pathlib.PosixPath(config_file_path).absolute()
@@ -104,7 +104,7 @@ def _load_and_parse_config_file(config, log):
         return {}
 
 
-def _wait_for_shutdown_or_kill(pid):
+def wait_for_shutdown_or_kill(pid):
     for _i in range(5):
         try:
             os.kill(pid, 0)
@@ -114,6 +114,16 @@ def _wait_for_shutdown_or_kill(pid):
     os.kill(pid, signal.SIGKILL)
 
 
-def _get_pid(pidfile_path):
+def get_pid(pidfile_path):
     pidfile = PIDLockFile(pidfile_path)
     return pidfile.is_locked()
+
+
+def get_kafka_connection_details(kafka_conf):
+    con_details = {}
+    con_details['bootstrap_servers'] = kafka_conf.get('bootstrap_urls', [])
+    con_details['ssl_keyfile'] = kafka_conf.get('key_file')
+    con_details['ssl_certfile'] = kafka_conf.get('cert_file')
+    con_details['ssl_cafile'] = kafka_conf.get('ca_file')
+    con_details['security_protocol'] = 'SSL'
+    return con_details

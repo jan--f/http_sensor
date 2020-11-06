@@ -131,20 +131,13 @@ class MyKafkaProducer:
     Wrap KafkaProducer to simplify setting options and sending messages
     '''
 
-    def __init__(self, kafka_conf, log):
+    def __init__(self, kafka_config, log):
         self.log = log
-        bootstrap_urls = kafka_conf.get('bootstrap_urls', [])
-        self.topic = kafka_conf.get('topic', '')
-        key_file = kafka_conf.get('key_file')
-        cert_file = kafka_conf.get('cert_file')
-        ca_file = kafka_conf.get('ca_file')
+        self.topic = kafka_config.get('topic', '')
+        con_details = helpers.get_kafka_connection_details(kafka_config)
         self.prod = KafkaProducer(
-            bootstrap_servers=bootstrap_urls,
-            ssl_keyfile=key_file,
-            ssl_certfile=cert_file,
-            ssl_cafile=ca_file,
-            security_protocol='SSL',
             value_serializer=pickle.dumps,
+            **con_details,
         )
         self.log.info('Successfully created KafkaProducer')
 
@@ -182,8 +175,8 @@ class Sensors(helpers.DaemonThreadRunner):
         '''
         conf = {}
         try:
-            conf = helpers._load_and_parse_config_file(self.args.config,
-                                                       self.log)
+            conf = helpers.load_and_parse_config_file(self.args.config,
+                                                      self.log)
 
             # load our urls and if successful populate the inital queue.
             urls = conf.get('urls', [])
@@ -291,10 +284,10 @@ def start(args):
 
 
 def stop(args):
-    pid = helpers._get_pid(args.pid_file)
+    pid = helpers.get_pid(args.pid_file)
     if pid:
         os.kill(pid, signal.SIGTERM)
-        helpers._wait_for_shutdown_or_kill(pid)
+        helpers.wait_for_shutdown_or_kill(pid)
     else:
         print(f'{NAME}: NOT running')
 
@@ -305,7 +298,7 @@ def restart(args):
 
 
 def status(args):
-    pid = helpers._get_pid(args.pid_file)
+    pid = helpers.get_pid(args.pid_file)
     if pid:
         print(f'{NAME}: running as pid {pid}')
     else:
@@ -313,7 +306,7 @@ def status(args):
 
 
 def reload(args):
-    pid = helpers._get_pid(args.pid_file)
+    pid = helpers.get_pid(args.pid_file)
     if pid:
         os.kill(pid, signal.SIGUSR1)
     else:
