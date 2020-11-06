@@ -30,4 +30,8 @@ jobs:
         run: pip install tox
       # Runs a single command using the runners shell
       - name: Run a one-line script
-        run: tox
+        run: tox -e py3
+      - name: Run a one-line script
+        run: tox -e mypy
+      - name: Run a one-line script
+        run: tox -e pylint
