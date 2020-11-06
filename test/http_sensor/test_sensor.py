@@ -25,9 +25,7 @@ from http_sensor import sensor
 @pytest.fixture
 def worker_config():
     mock_kafka = create_autospec(sensor.MyKafkaProducer)
-    mock_config = {'log': MagicMock(),
-                   'kafka_producer': mock_kafka}
-    return mock_config
+    return MagicMock(), mock_kafka
 
 
 @pytest.fixture
@@ -92,7 +90,7 @@ def test_sleep_is_called_if_wait_time(_mock_get,
             priority=sleep_until,
             data=MagicMock()
         )
-        sensor.worker(mock_data_item, worker_config)
+        sensor.worker(mock_data_item, worker_config[0], worker_config[1])
         mocked_sleep.assert_called_once()
 
 
@@ -106,34 +104,32 @@ def test_sleep_is_not_called_if_wait_time_is_negative(_mock_get,
                                                       sleep_until):
     mocked_now.return_value = 2
     with patch('http_sensor.sensor.time.sleep') as mocked_sleep:
-        sensor.worker(data_item, worker_config)
+        sensor.worker(data_item, worker_config[0], worker_config[1])
         mocked_sleep.assert_not_called()
 
 
 @patch('http_sensor.sensor.requests.get')
 def test_requests_get_is_called(mocked_get, worker_config, data_item):
-    sensor.worker(data_item, worker_config)
+    sensor.worker(data_item, worker_config[0], worker_config[1])
     mocked_get.assert_called_once()
 
 
 @patch('http_sensor.sensor.requests.get')
 def test_kafka_send_is_called_once(_mocked_get, worker_config, data_item):
-    sensor.worker(data_item, worker_config)
-    worker_config['kafka_producer'].send.assert_called_once()
+    sensor.worker(data_item, worker_config[0], worker_config[1])
+    worker_config[1].send.assert_called_once()
 
 
 @patch('http_sensor.sensor.requests.get')
 def test_kafka_send_not_called_when_no_producer(_mocked_get, data_item):
     mock_kafka = MagicMock(__bool__=MagicMock(return_value=False))
-    mock_config = {'log': MagicMock(),
-                   'kafka_producer': mock_kafka}
-    sensor.worker(data_item, mock_config)
+    sensor.worker(data_item, MagicMock(), mock_kafka)
     mock_kafka.send.assert_not_called()
 
 
 def test_return_on_empty():
     test_queue = PriorityQueue()
-    items = sensor.get_queue_slice(test_queue)
+    items = sensor.get_queue_slice(test_queue, 1)
     assert not list(items)
 
 
