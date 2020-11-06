@@ -5,10 +5,36 @@ from kafka_db_writer import kafka_db_writer as consumer
 
 
 def main():
-    # TODO add func default to parser for help message
     parser = argparse.ArgumentParser(
-        description='Control http-sensor components'
+        description='''Control http-sensor components
+
+Both components read a config file in yaml format. It should contain a
+the necessary runtime configuration, similar to this example:
+
+urls: # a list of urls to scrape and how often
+  - url: <URL>
+    repeat: 15 # repeat interval in seconds
+    regex: foo # an optional regex to check the response content agains
+kafka:
+  bootstrap_urls:
+    - <Kafka URL>
+  topic: topic
+  key_file: key.key # key to connect to Kafka
+  cert_file: cert.pem # certificate to connect to Kafka
+  ca_file: ca.pem # CA to connect to Kafka
+db:
+  # the db connect string will be fed straight to psycopg2 connect
+  connect: dbname=<db_name> user=<user> password=<user password> host=<db host name> port=<port>
+  tables:
+    - <list of tables>
+
+Not all keys are needed by all components but a missing component might
+impact functionality. For example the sensor component can run without
+the 'kafka' key, but in turn will not send its results to Kafka.
+        ''',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.set_defaults(func=lambda _x: parser.print_help())
 
     subparsers = parser.add_subparsers()
 
@@ -21,15 +47,23 @@ def main():
 
 
 def _setup_consumer_parser(subparsers):
-    # TODO cleanup uneeded comands
-    # TODO add func default to consumer parser for help message
     consumer_parser = subparsers.add_parser(
         'consumer',
-        help='Status and control for consumer component'
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description='''Get the status from and control the consumer component
+
+The consumer will run as a daemon process in the background and poll a Kafka
+instance according to the configuration. If it receives messages it
+will write them to a database. Only after the message has been
+persisted it will commit the read message(s) to Kafka, so nothing
+should get lost.
+        '''
     )
+    consumer_parser.set_defaults(func=lambda _x: consumer_parser.print_help())
     consumer_parser.add_argument(
         '--max_workers',
-        help='Configure a worker limit',
+        help='Configure a worker limit, ideally corresponds to your '
+             'topic partitions',
         type=int,
         default=8,
     )
@@ -93,11 +127,26 @@ def consumer_ctl(args):
 
 
 def _setup_sensor_parser(subparsers):
-    # TODO add func default to sensor_parser for help message
     sensor_parser = subparsers.add_parser(
         'sensor',
-        help='Status and control for sensor component'
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description='''Get status from and control the sensor component
+The sensor will run as a daemon process in the background and make requests to
+the URLs configured. If no URLs are configured it will just exit. URLs
+are repeatedly requested according to the URLs 'repeat' property (see
+http_sensor_ctl -h for an example).
+Please note that the repeat interval is not exact _and_ defines the
+wait interval between the end of the previous request (including the
+write operation to Kafka) and the next attempt. So slow webservers,
+large responses and slow Kafka instances will add to the interval.
+
+Requests are scheduled according to their projected next execution time.
+This can however fall behind if the worker thread pool is overloaded.
+In this case try to configure more workers or reduce the number of URLs
+to be scraped.
+        '''
     )
+    sensor_parser.set_defaults(func=lambda _x: sensor_parser.print_help())
     sensor_parser.add_argument(
         '--max_workers',
         help='Configure a worker limit',

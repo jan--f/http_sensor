@@ -311,8 +311,3 @@ def reload(args):
         os.kill(pid, signal.SIGUSR1)
     else:
         print(f'{NAME}: NOT running')
-
-
-# TODO either implement or remove this and the argparser command
-def add(args):
-    pass
