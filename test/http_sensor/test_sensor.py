@@ -1,13 +1,3 @@
-from queue import PriorityQueue
-from unittest.mock import MagicMock, patch, create_autospec
-
-import pytest
-import hypothesis.strategies as st
-from hypothesis import given, settings, example
-
-from http_sensor import sensor
-
-
 '''
 Tests for the worker function. This mainly tests a few invariants that
 should hold true:
@@ -20,6 +10,16 @@ should hold true:
     - if a KafkaProducer is passed, call its send function
 
 '''
+
+
+from queue import PriorityQueue
+from unittest.mock import MagicMock, patch, create_autospec
+
+import pytest
+import hypothesis.strategies as st
+from hypothesis import given, settings
+
+from http_sensor import sensor
 
 
 @pytest.fixture

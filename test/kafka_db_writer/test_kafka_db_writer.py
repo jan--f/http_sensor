@@ -1,14 +1,3 @@
-from unittest.mock import MagicMock, patch
-
-import pytest
-import hypothesis.strategies as st
-
-from hypothesis import given, settings, example
-from kafka import KafkaConsumer
-
-from kafka_db_writer import kafka_db_writer
-
-
 '''
 The kafka db writer has not too many interesting parts to test. The main
 invariant for the worker is that it should only ever commit to kafka if the
@@ -17,6 +6,15 @@ message was successfully writen to the database.
 Once a more flexible multithreading model is implemented, the rescheduling of
 workers would be interesting as well.
 '''
+
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from kafka import KafkaConsumer
+
+from kafka_db_writer import kafka_db_writer
 
 
 @pytest.fixture
